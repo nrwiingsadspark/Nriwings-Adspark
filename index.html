@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Nriwings AdSpark — Google Ads AI Agent</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.10.3/Recharts.min.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0a1628;color:#eef4fb;font-family:'Inter',system-ui,sans-serif}
+  input::placeholder{color:#5d7493}
+  ::-webkit-scrollbar{width:8px;height:8px}
+  ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:8px}
+  .spin{animation:spin 1s linear infinite;display:inline-block}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  button{font-family:inherit}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useEffect } = React;
+const { LineChart, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } = Recharts;
+
+const seedCampaigns = [
+  { id: 1, name: "Brand - Search",      clicks: 1840, impressions: 24500, cost: 920,  conversions: 96 },
+  { id: 2, name: "Generic - Dental",    clicks: 920,  impressions: 41200, cost: 1610, conversions: 22 },
+  { id: 3, name: "Competitor - PI Law", clicks: 410,  impressions: 18900, cost: 2050, conversions: 8  },
+  { id: 4, name: "Local - Med Spa",     clicks: 1260, impressions: 33100, cost: 880,  conversions: 71 },
+];
+
+const fmt = (n, d=0) => (n==null||isNaN(n)) ? "—" : Number(n).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
+const suggestions = [
+  "Which campaigns are wasting my budget?",
+  "Why is my cost per conversion so high?",
+  "Where should I shift my ad spend?",
+  "Which campaigns are underperforming?",
+];
+
+function App(){
+  const [campaigns,setCampaigns]=useState(seedCampaigns);
+  const [tab,setTab]=useState("dashboard");
+  const [messages,setMessages]=useState([{role:"assistant",content:"Hi — main aapka AdSpark agent hoon. Left side aapka campaign data dikh raha hai. Performance, wasted spend, ya optimization ke baare mein kuch bhi poochein. Neeche diye suggestions se shuru karein."}]);
+  const [input,setInput]=useState("");
+  const [loading,setLoading]=useState(false);
+  const [draft,setDraft]=useState({name:"",clicks:"",impressions:"",cost:"",conversions:""});
+  const chatEnd=useRef(null), fileRef=useRef(null);
+
+  useEffect(()=>{chatEnd.current&&chatEnd.current.scrollIntoView({behavior:"smooth"})},[messages,loading]);
+
+  const totals=campaigns.reduce((a,c)=>({clicks:a.clicks+(+c.clicks||0),impressions:a.impressions+(+c.impressions||0),cost:a.cost+(+c.cost||0),conversions:a.conversions+(+c.conversions||0)}),{clicks:0,impressions:0,cost:0,conversions:0});
+  const enriched=campaigns.map(c=>{const cost=+c.cost||0,conv=+c.conversions||0,clk=+c.clicks||0,imp=+c.impressions||0;return{...c,cpc:clk?cost/clk:0,ctr:imp?(clk/imp)*100:0,cpa:conv?cost/conv:0,cvr:clk?(conv/clk)*100:0}});
+  const avgCpa=totals.conversions?totals.cost/totals.conversions:0;
+  const avgCtr=totals.impressions?(totals.clicks/totals.impressions)*100:0;
+
+  const addCampaign=()=>{if(!draft.name)return;setCampaigns([...campaigns,{id:Date.now(),name:draft.name,clicks:+draft.clicks||0,impressions:+draft.impressions||0,cost:+draft.cost||0,conversions:+draft.conversions||0}]);setDraft({name:"",clicks:"",impressions:"",cost:"",conversions:""})};
+  const removeCampaign=(id)=>setCampaigns(campaigns.filter(c=>c.id!==id));
+
+  const handleCSV=(e)=>{
+    const file=e.target.files&&e.target.files[0]; if(!file)return;
+    const reader=new FileReader();
+    reader.onload=(ev)=>{
+      const rows=ev.target.result.split(/\r?\n/).filter(Boolean);
+      const header=rows[0].toLowerCase().split(",").map(s=>s.trim());
+      const idx=(k)=>header.findIndex(h=>h.includes(k));
+      const ni=idx("name")>=0?idx("name"):idx("campaign");
+      const ci=idx("click"),ii=idx("impr"),coi=idx("cost")>=0?idx("cost"):idx("spend"),cvi=idx("conv");
+      const parsed=rows.slice(1).map((r,i)=>{const cells=r.split(",").map(s=>s.trim());return{id:Date.now()+i,name:cells[ni]||("Campaign "+(i+1)),clicks:+cells[ci]||0,impressions:+cells[ii]||0,cost:+String(cells[coi]).replace(/[^0-9.]/g,"")||0,conversions:+cells[cvi]||0}}).filter(c=>c.name);
+      if(parsed.length){setCampaigns(parsed);setMessages(m=>[...m,{role:"assistant",content:"Aapki CSV se "+parsed.length+" campaigns load ho gaye. Poochein kya stand out kar raha hai, ya dashboard dekhein."}])}
+    };
+    reader.readAsText(file); e.target.value="";
+  };
+
+  const ask=async(q)=>{
+    const question=(q!=null?q:input).trim(); if(!question||loading)return;
+    const newMsgs=[...messages,{role:"user",content:question}];
+    setMessages(newMsgs); setInput(""); setLoading(true);
+    const ctx=enriched.map(c=>c.name+": clicks "+c.clicks+", impressions "+c.impressions+", cost $"+fmt(c.cost)+", conversions "+c.conversions+", CPC $"+c.cpc.toFixed(2)+", CTR "+c.ctr.toFixed(2)+"%, CPA $"+c.cpa.toFixed(2)+", CVR "+c.cvr.toFixed(2)+"%").join("\n");
+    const system="You are AdSpark, an expert Google Ads AI analyst (like Ahoora.ai). You sit on top of the user's Google Ads data and answer with sharp, specific, actionable insight. Be concise and practical. Reference actual campaign names and numbers. Recommend concrete actions (pause, shift budget, raise/lower bids, add negatives). Use short paragraphs and bullets. Never invent campaigns or numbers not in the data.\n\nAccount totals: clicks "+fmt(totals.clicks)+", impressions "+fmt(totals.impressions)+", cost $"+fmt(totals.cost)+", conversions "+fmt(totals.conversions)+", blended CPA $"+avgCpa.toFixed(2)+", blended CTR "+avgCtr.toFixed(2)+"%.\n\nPer-campaign data:\n"+ctx;
+    try{
+      const res=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({system,messages:newMsgs})});
+      const data=await res.json();
+      const text=data.text||("Error: "+(data.error||"unknown"));
+      setMessages(m=>[...m,{role:"assistant",content:text}]);
+    }catch(err){setMessages(m=>[...m,{role:"assistant",content:"Analysis engine tak pahunchne mein dikkat aayi. Dobara try karein."}])}
+    setLoading(false);
+  };
+
+  const chartData=enriched.map(c=>({name:(c.name.split(" - ")[0]||c.name),cost:c.cost,conversions:c.conversions,cpa:+c.cpa.toFixed(2)}));
+
+  return (
+    <div style={S.app}>
+      <header style={S.header}>
+        <div style={S.logo}><span style={S.mark}>N</span><span>Nriwings <span style={{color:"#1fd1c5"}}>AdSpark</span></span></div>
+        <div style={S.headRight}>✦ Google Ads AI Agent</div>
+      </header>
+      <div style={S.body}>
+        <aside style={S.left}>
+          <div style={S.panelHead}><span style={S.panelTitle}>Your Campaigns</span>
+            <button style={S.csvBtn} onClick={()=>fileRef.current.click()}>↑ CSV</button>
+            <input ref={fileRef} type="file" accept=".csv" onChange={handleCSV} style={{display:"none"}}/>
+          </div>
+          <div style={S.campList}>
+            {campaigns.map(c=>{const cpc=(+c.clicks?(+c.cost/+c.clicks):0);return(
+              <div key={c.id} style={S.campRow}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={S.campName}>{c.name}</div>
+                  <div style={S.campMeta}>${fmt(c.cost)} · {fmt(c.conversions)} conv · {cpc.toFixed(2)} CPC</div>
+                </div>
+                <button style={S.del} onClick={()=>removeCampaign(c.id)}>🗑</button>
+              </div>)})}
+          </div>
+          <div style={S.addBox}>
+            <div style={S.addTitle}>Add a campaign</div>
+            <input style={S.in} placeholder="Campaign name" value={draft.name} onChange={e=>setDraft({...draft,name:e.target.value})}/>
+            <div style={S.inGrid}>
+              <input style={S.in} placeholder="Clicks" value={draft.clicks} onChange={e=>setDraft({...draft,clicks:e.target.value})}/>
+              <input style={S.in} placeholder="Impressions" value={draft.impressions} onChange={e=>setDraft({...draft,impressions:e.target.value})}/>
+              <input style={S.in} placeholder="Cost ($)" value={draft.cost} onChange={e=>setDraft({...draft,cost:e.target.value})}/>
+              <input style={S.in} placeholder="Conversions" value={draft.conversions} onChange={e=>setDraft({...draft,conversions:e.target.value})}/>
+            </div>
+            <button style={S.addBtn} onClick={addCampaign}>+ Add campaign</button>
+          </div>
+        </aside>
+        <main style={S.right}>
+          <div style={S.tabs}>
+            <button style={{...S.tab,...(tab==="dashboard"?S.tabOn:{})}} onClick={()=>setTab("dashboard")}>▦ Dashboard</button>
+            <button style={{...S.tab,...(tab==="chat"?S.tabOn:{})}} onClick={()=>setTab("chat")}>💬 Ask AdSpark</button>
+          </div>
+          {tab==="dashboard"?(
+            <div style={S.dash}>
+              <div style={S.kpiRow}>
+                <Kpi label="Total spend" value={"$"+fmt(totals.cost)}/>
+                <Kpi label="Clicks" value={fmt(totals.clicks)}/>
+                <Kpi label="Conversions" value={fmt(totals.conversions)}/>
+                <Kpi label="Blended CPA" value={"$"+avgCpa.toFixed(2)}/>
+              </div>
+              <div style={S.card}>
+                <div style={S.cardTitle}>Cost vs Conversions by campaign</div>
+                <ResponsiveContainer width="100%" height={250}>
+                  <BarChart data={chartData} margin={{top:10,right:10,left:-10,bottom:0}}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,.06)"/>
+                    <XAxis dataKey="name" tick={{fill:"#9fb3cd",fontSize:12}}/>
+                    <YAxis tick={{fill:"#9fb3cd",fontSize:12}}/>
+                    <Tooltip contentStyle={{background:"#11233d",border:"1px solid rgba(255,255,255,.12)",borderRadius:10,color:"#eef4fb"}}/>
+                    <Bar dataKey="cost" fill="#2ea6ff" radius={[5,5,0,0]}/>
+                    <Bar dataKey="conversions" fill="#1fd1c5" radius={[5,5,0,0]}/>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <div style={S.card}>
+                <div style={S.cardTitle}>Cost per acquisition (CPA) — lower is better</div>
+                <ResponsiveContainer width="100%" height={220}>
+                  <BarChart data={chartData} layout="vertical" margin={{left:20,right:20}}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,.06)"/>
+                    <XAxis type="number" tick={{fill:"#9fb3cd",fontSize:12}}/>
+                    <YAxis dataKey="name" type="category" width={90} tick={{fill:"#9fb3cd",fontSize:12}}/>
+                    <Tooltip contentStyle={{background:"#11233d",border:"1px solid rgba(255,255,255,.12)",borderRadius:10,color:"#eef4fb"}}/>
+                    <Bar dataKey="cpa" radius={[0,5,5,0]}>
+                      {chartData.map((d,i)=><Cell key={i} fill={d.cpa>avgCpa?"#ff8a3d":"#1fd1c5"}/>)}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+                <div style={S.hint}>Orange bars aapke blended CPA ${avgCpa.toFixed(2)} se zyada hain — optimize karne layak.</div>
+              </div>
+            </div>
+          ):(
+            <div style={S.chatWrap}>
+              <div style={S.chatScroll}>
+                {messages.map((m,i)=>(
+                  <div key={i} style={{...S.msg,...(m.role==="user"?S.msgUser:S.msgBot)}}>
+                    {m.role==="assistant"&&<div style={S.botTag}>✦ ADSPARK</div>}
+                    <div>{m.content}</div>
+                  </div>
+                ))}
+                {loading&&<div style={{...S.msg,...S.msgBot}}><div style={S.botTag}>✦ ADSPARK</div><div><span className="spin">⏳</span> Analyzing your campaigns…</div></div>}
+                <div ref={chatEnd}/>
+              </div>
+              {messages.length<=1&&(
+                <div style={S.sugg}>{suggestions.map((s,i)=><button key={i} style={S.suggBtn} onClick={()=>ask(s)}>{s}</button>)}</div>
+              )}
+              <div style={S.inputBar}>
+                <input style={S.chatInput} placeholder="Ask about your Google Ads performance…" value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&ask()}/>
+                <button style={S.sendBtn} onClick={()=>ask()} disabled={loading}>{loading?<span className="spin">⏳</span>:"➤"}</button>
+              </div>
+            </div>
+          )}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+function Kpi({label,value}){return(<div style={S.kpi}><div><div style={S.kpiVal}>{value}</div><div style={S.kpiLbl}>{label}</div></div></div>)}
+
+const S={
+  app:{minHeight:"100vh",display:"flex",flexDirection:"column"},
+  header:{height:60,borderBottom:"1px solid rgba(255,255,255,.08)",display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 22px",background:"rgba(14,29,51,.6)"},
+  logo:{display:"flex",alignItems:"center",gap:9,fontWeight:800,fontSize:18,letterSpacing:"-.02em"},
+  mark:{width:30,height:30,borderRadius:8,background:"linear-gradient(135deg,#1fd1c5,#2ea6ff)",display:"grid",placeItems:"center",color:"#06201e",fontWeight:800,fontSize:15},
+  headRight:{fontSize:13,color:"#9fb3cd",fontWeight:600},
+  body:{flex:1,display:"flex",minHeight:0},
+  left:{width:320,borderRight:"1px solid rgba(255,255,255,.08)",padding:18,overflowY:"auto",background:"#0c1a30",display:"flex",flexDirection:"column",gap:16},
+  panelHead:{display:"flex",alignItems:"center",justifyContent:"space-between"},
+  panelTitle:{fontWeight:700,fontSize:14},
+  csvBtn:{background:"rgba(31,209,197,.12)",color:"#1fd1c5",border:"1px solid rgba(31,209,197,.3)",borderRadius:8,padding:"6px 11px",fontSize:12,fontWeight:700,cursor:"pointer"},
+  campList:{display:"flex",flexDirection:"column",gap:8},
+  campRow:{display:"flex",alignItems:"center",gap:8,background:"#11233d",border:"1px solid rgba(255,255,255,.07)",borderRadius:10,padding:"11px 12px"},
+  campName:{fontWeight:600,fontSize:13.5,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"},
+  campMeta:{fontSize:11.5,color:"#9fb3cd",marginTop:2},
+  del:{background:"none",border:"none",color:"#6b809d",cursor:"pointer",padding:4,fontSize:13},
+  addBox:{background:"#11233d",border:"1px solid rgba(255,255,255,.07)",borderRadius:12,padding:14,display:"flex",flexDirection:"column",gap:9},
+  addTitle:{fontSize:12.5,fontWeight:700,color:"#9fb3cd"},
+  inGrid:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8},
+  in:{background:"#0a1628",border:"1px solid rgba(255,255,255,.14)",borderRadius:8,padding:"9px 11px",color:"#eef4fb",fontSize:13,width:"100%",fontFamily:"inherit"},
+  addBtn:{background:"linear-gradient(135deg,#1fd1c5,#2ea6ff)",color:"#06201e",border:"none",borderRadius:8,padding:"10px",fontSize:13,fontWeight:700,cursor:"pointer",marginTop:2},
+  right:{flex:1,display:"flex",flexDirection:"column",minWidth:0},
+  tabs:{display:"flex",gap:6,padding:"14px 18px 0"},
+  tab:{background:"none",border:"none",color:"#9fb3cd",padding:"10px 16px",borderRadius:9,fontSize:14,fontWeight:600,cursor:"pointer"},
+  tabOn:{background:"#11233d",color:"#eef4fb"},
+  dash:{padding:18,overflowY:"auto",display:"flex",flexDirection:"column",gap:16},
+  kpiRow:{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12},
+  kpi:{background:"#11233d",border:"1px solid rgba(255,255,255,.07)",borderRadius:12,padding:16},
+  kpiVal:{fontWeight:800,fontSize:20,letterSpacing:"-.02em"},
+  kpiLbl:{fontSize:12,color:"#9fb3cd"},
+  card:{background:"#11233d",border:"1px solid rgba(255,255,255,.07)",borderRadius:14,padding:18},
+  cardTitle:{fontWeight:700,fontSize:14.5,marginBottom:14},
+  hint:{fontSize:12.5,color:"#9fb3cd",marginTop:10},
+  chatWrap:{flex:1,display:"flex",flexDirection:"column",minHeight:0,padding:"14px 18px 18px"},
+  chatScroll:{flex:1,overflowY:"auto",display:"flex",flexDirection:"column",gap:14,paddingRight:4},
+  msg:{maxWidth:"82%",padding:"13px 16px",borderRadius:14,fontSize:14.5,lineHeight:1.6,whiteSpace:"pre-wrap"},
+  msgUser:{alignSelf:"flex-end",background:"linear-gradient(135deg,#1fd1c5,#2ea6ff)",color:"#06201e",fontWeight:500,borderBottomRightRadius:4},
+  msgBot:{alignSelf:"flex-start",background:"#11233d",border:"1px solid rgba(255,255,255,.08)",borderBottomLeftRadius:4},
+  botTag:{fontSize:11.5,fontWeight:700,color:"#1fd1c5",marginBottom:6,letterSpacing:".06em"},
+  sugg:{display:"flex",flexWrap:"wrap",gap:8,margin:"14px 0"},
+  suggBtn:{background:"#11233d",border:"1px solid rgba(255,255,255,.12)",color:"#cfe0f2",borderRadius:999,padding:"9px 15px",fontSize:13,cursor:"pointer"},
+  inputBar:{display:"flex",gap:10,marginTop:14,background:"#11233d",border:"1px solid rgba(255,255,255,.12)",borderRadius:14,padding:8},
+  chatInput:{flex:1,background:"none",border:"none",color:"#eef4fb",fontSize:14.5,padding:"10px 12px",outline:"none",fontFamily:"inherit"},
+  sendBtn:{width:44,height:44,borderRadius:10,background:"linear-gradient(135deg,#ffb020,#ff8a3d)",border:"none",color:"#1a1205",cursor:"pointer",fontSize:18},
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
