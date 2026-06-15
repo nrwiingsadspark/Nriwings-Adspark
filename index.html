@@ -45,7 +45,7 @@ const suggestions = [
 function App(){
   const [campaigns,setCampaigns]=useState(seedCampaigns);
   const [tab,setTab]=useState("dashboard");
-  const [messages,setMessages]=useState([{role:"assistant",content:"Hi — main aapka AdSpark agent hoon. Left side aapka campaign data dikh raha hai. Performance, wasted spend, ya optimization ke baare mein kuch bhi poochein. Neeche diye suggestions se shuru karein."}]);
+  const [messages,setMessages]=useState([{role:"assistant",content:"Hi — I'm your AdSpark agent. Your campaign data is shown on the left. Ask me anything about performance, wasted spend, or where to optimize. Try one of the suggestions below to get started."}]);
   const [input,setInput]=useState("");
   const [loading,setLoading]=useState(false);
   const [draft,setDraft]=useState({name:"",clicks:"",impressions:"",cost:"",conversions:""});
@@ -61,19 +61,84 @@ function App(){
   const addCampaign=()=>{if(!draft.name)return;setCampaigns([...campaigns,{id:Date.now(),name:draft.name,clicks:+draft.clicks||0,impressions:+draft.impressions||0,cost:+draft.cost||0,conversions:+draft.conversions||0}]);setDraft({name:"",clicks:"",impressions:"",cost:"",conversions:""})};
   const removeCampaign=(id)=>setCampaigns(campaigns.filter(c=>c.id!==id));
 
+  // ---- SMART CSV reader: also handles Google Ads exports ----
+  const splitLine=(line,delim)=>{
+    // ignores delimiters inside quotes (e.g. "Brand, Search")
+    const out=[]; let cur=""; let q=false;
+    for(let i=0;i<line.length;i++){const ch=line[i];
+      if(ch==='"'){ if(q&&line[i+1]==='"'){cur+='"';i++;} else q=!q; }
+      else if(ch===delim&&!q){out.push(cur);cur="";}
+      else cur+=ch;
+    }
+    out.push(cur);
+    return out.map(s=>s.trim().replace(/^"|"$/g,""));
+  };
+  const toNum=(v)=>{ if(v==null)return 0; let s=String(v).replace(/[^0-9.\-]/g,""); const n=parseFloat(s); return isNaN(n)?0:n; };
+
   const handleCSV=(e)=>{
     const file=e.target.files&&e.target.files[0]; if(!file)return;
     const reader=new FileReader();
     reader.onload=(ev)=>{
-      const rows=ev.target.result.split(/\r?\n/).filter(Boolean);
-      const header=rows[0].toLowerCase().split(",").map(s=>s.trim());
-      const idx=(k)=>header.findIndex(h=>h.includes(k));
-      const ni=idx("name")>=0?idx("name"):idx("campaign");
-      const ci=idx("click"),ii=idx("impr"),coi=idx("cost")>=0?idx("cost"):idx("spend"),cvi=idx("conv");
-      const parsed=rows.slice(1).map((r,i)=>{const cells=r.split(",").map(s=>s.trim());return{id:Date.now()+i,name:cells[ni]||("Campaign "+(i+1)),clicks:+cells[ci]||0,impressions:+cells[ii]||0,cost:+String(cells[coi]).replace(/[^0-9.]/g,"")||0,conversions:+cells[cvi]||0}}).filter(c=>c.name);
-      if(parsed.length){setCampaigns(parsed);setMessages(m=>[...m,{role:"assistant",content:"Aapki CSV se "+parsed.length+" campaigns load ho gaye. Poochein kya stand out kar raha hai, ya dashboard dekhein."}])}
+      try{
+        let raw=ev.target.result;
+        // remove BOM (invisible character at file start)
+        raw=raw.replace(/^\uFEFF/,"").replace(/\u0000/g,"");
+        let lines=raw.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+
+        // detect delimiter: comma, tab or semicolon
+        const sample=lines.slice(0,15).join("\n");
+        const counts={",":(sample.match(/,/g)||[]).length,"\t":(sample.match(/\t/g)||[]).length,";":(sample.match(/;/g)||[]).length};
+        const delim=Object.keys(counts).reduce((a,b)=>counts[b]>counts[a]?b:a,",");
+
+        // find the header row: the line containing campaign / clicks / cost / impr
+        // (Google Ads adds extra account-name and date lines at the top)
+        let hIdx=-1;
+        for(let i=0;i<Math.min(lines.length,15);i++){
+          const low=lines[i].toLowerCase();
+          if((low.includes("campaign")||low.includes("clicks")||low.includes("cost")||low.includes("impr"))&&splitLine(lines[i],delim).length>=2){hIdx=i;break;}
+        }
+        if(hIdx<0)hIdx=0;
+
+        const header=splitLine(lines[hIdx],delim).map(s=>s.toLowerCase());
+        const find=(...keys)=>{for(const k of keys){const j=header.findIndex(h=>h.includes(k));if(j>=0)return j;}return -1;};
+        const ni=find("campaign","name");
+        const ci=find("click");
+        const ii=find("impr");
+        const coi=find("cost","spend","amount");
+        const cvi=find("conversion","conv");
+
+        const parsed=[];
+        for(let i=hIdx+1;i<lines.length;i++){
+          const c=splitLine(lines[i],delim);
+          const nm=ni>=0?c[ni]:c[0];
+          if(!nm)continue;
+          const low=nm.toLowerCase();
+          // skip Google Ads summary "Total" rows
+          if(low.startsWith("total")||low.startsWith("--"))continue;
+          parsed.push({
+            id:Date.now()+i,
+            name:nm,
+            clicks:toNum(ci>=0?c[ci]:0),
+            impressions:toNum(ii>=0?c[ii]:0),
+            cost:toNum(coi>=0?c[coi]:0),
+            conversions:toNum(cvi>=0?c[cvi]:0),
+          });
+        }
+
+        if(parsed.length){
+          setCampaigns(parsed);
+          setTab("dashboard");
+          setMessages(m=>[...m,{role:"assistant",content:parsed.length+" campaigns loaded from your CSV. Check the dashboard or ask a question in 'Ask AdSpark'."}]);
+        } else {
+          alert("The CSV was read but no campaigns were found. Make sure the file has Campaign, Clicks, Cost, and Conversions columns.");
+        }
+      }catch(err){
+        alert("Could not read the CSV: "+err.message+". Please check the file format and try again.");
+      }
     };
-    reader.readAsText(file); e.target.value="";
+    // pehle normal text, agar gibberish aaye to UTF-16 try
+    reader.readAsText(file);
+    e.target.value="";
   };
 
   const ask=async(q)=>{
@@ -81,13 +146,13 @@ function App(){
     const newMsgs=[...messages,{role:"user",content:question}];
     setMessages(newMsgs); setInput(""); setLoading(true);
     const ctx=enriched.map(c=>c.name+": clicks "+c.clicks+", impressions "+c.impressions+", cost $"+fmt(c.cost)+", conversions "+c.conversions+", CPC $"+c.cpc.toFixed(2)+", CTR "+c.ctr.toFixed(2)+"%, CPA $"+c.cpa.toFixed(2)+", CVR "+c.cvr.toFixed(2)+"%").join("\n");
-    const system="You are AdSpark, an expert Google Ads AI analyst (like Ahoora.ai). You sit on top of the user's Google Ads data and answer with sharp, specific, actionable insight. Be concise and practical. Reference actual campaign names and numbers. Recommend concrete actions (pause, shift budget, raise/lower bids, add negatives). Use short paragraphs and bullets. Never invent campaigns or numbers not in the data.\n\nAccount totals: clicks "+fmt(totals.clicks)+", impressions "+fmt(totals.impressions)+", cost $"+fmt(totals.cost)+", conversions "+fmt(totals.conversions)+", blended CPA $"+avgCpa.toFixed(2)+", blended CTR "+avgCtr.toFixed(2)+"%.\n\nPer-campaign data:\n"+ctx;
+    const system="You are AdSpark, an expert Google Ads AI analyst (like Ahoora.ai). Always respond in English only. You sit on top of the user's Google Ads data and answer with sharp, specific, actionable insight. Be concise and practical. Reference actual campaign names and numbers. Recommend concrete actions (pause, shift budget, raise/lower bids, add negatives). Use short paragraphs and bullets. Never invent campaigns or numbers not in the data.\n\nAccount totals: clicks "+fmt(totals.clicks)+", impressions "+fmt(totals.impressions)+", cost $"+fmt(totals.cost)+", conversions "+fmt(totals.conversions)+", blended CPA $"+avgCpa.toFixed(2)+", blended CTR "+avgCtr.toFixed(2)+"%.\n\nPer-campaign data:\n"+ctx;
     try{
       const res=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({system,messages:newMsgs})});
       const data=await res.json();
       const text=data.text||("Error: "+(data.error||"unknown"));
       setMessages(m=>[...m,{role:"assistant",content:text}]);
-    }catch(err){setMessages(m=>[...m,{role:"assistant",content:"Analysis engine tak pahunchne mein dikkat aayi. Dobara try karein."}])}
+    }catch(err){setMessages(m=>[...m,{role:"assistant",content:"Could not reach the analysis engine. Please try again."}])}
     setLoading(false);
   };
 
@@ -166,7 +231,7 @@ function App(){
                     </Bar>
                   </BarChart>
                 </ResponsiveContainer>
-                <div style={S.hint}>Orange bars aapke blended CPA ${avgCpa.toFixed(2)} se zyada hain — optimize karne layak.</div>
+                <div style={S.hint}>Orange bars are above your blended CPA of ${avgCpa.toFixed(2)} — these are the campaigns to optimize first.</div>
               </div>
             </div>
           ):(
